@@ -14,30 +14,6 @@ impl<'a, 'n, T: 'a> Reference<'a> for &'n T {
 	type Type = &'a T;
 }
 
-/// Trait to compare Reference implementors for equality.
-pub trait ReferencePartialEq<Other> where
-	Self:  Copy + for<'a> Reference<'a> + PartialEq<Other>,
-	Other: Copy + for<'a> Reference<'a>,
-{
-	fn eq<'a>(a: <Self as Reference<'a>>::Type, b: <Other as Reference<'a>>::Type) -> bool;
-}
-
-/// Trait to compare Reference implementors with eachother.
-pub trait ReferencePartialOrd<Other> where
-	Self:  Copy + for<'a> Reference<'a> + PartialOrd<Other> + PartialEq<Other>,
-	Other: Copy + for<'a> Reference<'a>,
-{
-	fn partial_cmp<'a>(a: <Self as Reference<'a>>::Type, b: <Other as Reference<'a>>::Type) -> Option<std::cmp::Ordering>;
-}
-
-/// Trait to compare Reference implementors with eachother.
-pub trait ReferenceOrd<Other> where
-	Self:  Copy + for<'a> Reference<'a> + Ord,
-	Other: Copy + for<'a> Reference<'a>,
-{
-	fn cmp<'a>(a: <Self as Reference<'a>>::Type, <Self as Reference<'a>>::Type) -> std::cmp::Ordering;
-}
-
 /// Abtraction of an owning thing that can be borrowed from.
 pub trait Referencable<Borrowed> where Borrowed: Copy + for<'b> Reference<'b> {
 	fn borrow<'a>(&'a self)                 -> <Borrowed as Reference<'a>>::Type;
@@ -45,6 +21,7 @@ pub trait Referencable<Borrowed> where Borrowed: Copy + for<'b> Reference<'b> {
 	fn from_ref<'a>(borrowed: &'a Borrowed) -> Self;
 }
 
+/// Cow clone for any compatible Owned and Reference type.
 #[derive(Debug)]
 pub enum Koe<B, O> where
 	B: Copy + for<'b> Reference<'b>,
@@ -76,10 +53,19 @@ impl<'a, B, O> Koe<B, O> where
 		self.move_into(value)
 	}
 
-	pub fn borrow<'b>(&'b self) -> <B as Reference<'b>>::Type where 'a: 'b {
+	pub fn as_ref(&'a self) -> B {
+		let borrow = match self {
+			&Borrowed(b)   => return b,
+			&Owned(ref o)  => O::borrow(o),
+		};
+		let borrowed: &B = unsafe { std::mem::transmute(&borrow) };
+		*borrowed
+	}
+
+	pub fn into_owned(self) -> O {
 		match self {
-			&Borrowed(ref b) => O::reborrow(b),
-			&Owned(ref o)    => O::borrow(o),
+			Borrowed(ref b) => O::from_ref(b),
+			Owned(o)        => o,
 		}
 	}
 
@@ -95,6 +81,34 @@ impl<'a, B, O> Koe<B, O> where
 	}
 }
 
+// AsRef
+// impl<B, O> AsRef<B> for Koe<B, O> where
+// 	B: Copy + for<'b> Reference<'b>,
+// 	O: Referencable<B>
+// {
+// 	fn as_ref<'b>(&'b self) -> &'b B {
+// 		&self.as_ref()
+// 	}
+// }
+
+// Deref
+// impl<B, O> std::ops::Deref for Koe<B, O> where
+// 	B: Copy + for<'b> Reference<'b>,
+// 	O: Referencable<B>
+// {
+// 	type Target = B;
+// 	fn deref<'b>(&'b self) -> &'b B { self.as_ref() }
+// }
+
+// Borrow
+// impl<B, O> std::borrow::Borrow<B> for Koe<B, O> where
+// 	B: Copy + for<'b> Reference<'b>,
+// 	O: Referencable<B>
+// {
+// 	fn borrow<'b>(&'b self) -> &'b B { self.as_ref() }
+// }
+
+// Clone
 impl<'a, B, O> Clone for Koe<B, O> where
 	B: Copy + for<'b> Reference<'b>,
 	O: Clone + Referencable<B>,
@@ -107,55 +121,63 @@ impl<'a, B, O> Clone for Koe<B, O> where
 	}
 }
 
-//impl<'a, B, O> From<B> for Koe<B, O> where (B, O): NotSame {
-//	fn from(value: B) -> Self { Borrowed(value) }
-//}
-//
-//impl<'a, B, O> From<O> for Koe<B, O> where (B, O): NotSame {
-//	fn from(value: O) -> Self { Owned(value) }
-//}
+// From<B>
+impl<B, O> From<B> for Koe<B, O> where
+	B: Copy + for<'a> Reference<'a>,
+	O: Referencable<B>,
+	(B, O): NotSame,
+{
+	fn from(value: B) -> Self { Borrowed(value) }
+}
 
+// From<O>
+impl< B, O> From<O> for Koe<B, O> where
+	B: Copy + for<'a> Reference<'a>,
+	O: Referencable<B>,
+	(B, O): NotSame,
+{
+	fn from(value: O) -> Self { Owned(value) }
+}
+
+// PartialEq
 impl<B1, O1, B2, O2> PartialEq<Koe<B2, O2>> for Koe<B1, O1> where
-	B1: Copy + for<'b> Reference<'b> + PartialEq<B2> + ReferencePartialEq<B2>,
+	B1: Copy + for<'b> Reference<'b> + PartialEq<B2>,
 	B2: Copy + for<'b> Reference<'b>,
 	O1: Referencable<B1>,
 	O2: Referencable<B2>,
 {
 	fn eq(&self, other: &Koe<B2, O2>) -> bool {
-		let this  = self.borrow();
-		let other = other.borrow();
-		<B1 as ReferencePartialEq<B2>>::eq(this, other)
+		self.as_ref().eq(&other.as_ref())
 	}
 }
 
+// Eq
 impl<B, O> Eq for Koe<B, O> where
-	B: Eq + Copy + for<'b> Reference<'b> + ReferencePartialEq<B>,
+	B: Eq + Copy + for<'b> Reference<'b>,
 	O: Referencable<B>,
 {}
 
+// PartialOrd
 impl<B1, O1, B2, O2> PartialOrd<Koe<B2, O2>> for Koe<B1, O1> where
-	B1: Copy + for<'b> Reference<'b> + PartialOrd<B2> + PartialEq<B2> + ReferencePartialEq<B2> + ReferencePartialOrd<B2>,
+	B1: Copy + for<'b> Reference<'b> + PartialOrd<B2> + PartialEq<B2>,
 	B2: Copy + for<'b> Reference<'b>,
 	O1: Referencable<B1>,
 	O2: Referencable<B2>,
 {
 	fn partial_cmp(&self, other: &Koe<B2, O2>) -> Option<std::cmp::Ordering> {
-		let this  = self.borrow();
-		let other = other.borrow();
-		<B1 as ReferencePartialOrd<B2>>::partial_cmp(this, other)
+		self.as_ref().partial_cmp(&other.as_ref())
 	}
 }
 
+// Ord
 impl<B, O> Ord for Koe<B, O> where
-	B: Copy + for<'b> Reference<'b> + PartialOrd<B> + Ord + PartialEq<B> + Eq + ReferencePartialEq<B> + ReferencePartialOrd<B> + ReferenceOrd<B>,
+	B: Copy + for<'b> Reference<'b> + PartialOrd<B> + Ord + PartialEq<B> + Eq,
 	B: Copy + for<'b> Reference<'b>,
 	O: Referencable<B>,
 	O: Referencable<B>,
 {
 	fn cmp(&self, other: &Koe<B, O>) -> std::cmp::Ordering {
-		let this  = self.borrow();
-		let other = other.borrow();
-		<B as ReferenceOrd<B>>::cmp(this, other)
+		self.as_ref().cmp(&other.as_ref())
 	}
 }
 
@@ -185,35 +207,17 @@ mod tests {
 		type Type = StringView<'b>;
 	}
 
-	impl<'n> ReferencePartialEq<StringView<'n>> for StringView<'n> {
-		fn eq<'a>(a: StringView<'a>, b: StringView<'a>) -> bool {
-			a.eq(&b)
-		}
-	}
-
-	impl<'n> ReferencePartialOrd<StringView<'n>> for StringView<'n> {
-		fn partial_cmp<'a>(a: StringView<'a>, b: StringView<'a>) -> Option<std::cmp::Ordering> {
-			a.partial_cmp(&b)
-		}
-	}
-
-	impl<'n> ReferenceOrd<StringView<'n>> for StringView<'n> {
-		fn cmp<'a>(a: StringView<'a>, b: StringView<'a>) -> std::cmp::Ordering {
-			a.cmp(&b)
-		}
-	}
-
 	impl<'n> Referencable<StringView<'n>> for String {
 		fn borrow<'a>(&'a self) -> StringView<'a> {
 			StringView::from(self)
 		}
 
-		fn reborrow<'a>(borrowed: &'a StringView<'n>) -> StringView<'a> {
-			*borrowed
+		fn reborrow<'a>(as_ref: &'a StringView<'n>) -> StringView<'a> {
+			*as_ref
 		}
 
-		fn from_ref<'a>(borrowed: &'a StringView<'n>) -> Self {
-			String::from(borrowed.data)
+		fn from_ref<'a>(as_ref: &'a StringView<'n>) -> Self {
+			String::from(as_ref.data)
 		}
 	}
 
@@ -235,9 +239,14 @@ mod tests {
 	#[test]
 	fn koe_str() {
 		let koe1: Koe<StringView, String> = Borrowed(StringView::new("hoi"));
-		koe1.borrow();
-		let koe2 = koe1.clone();
+		let koe2: Koe<StringView, String> = Borrowed(StringView::new("hoi"));
+		koe1.as_ref();
+		let koe3 = koe1.clone();
+		let a: StringView = koe2.as_ref();
 		assert!(koe1 == koe1);
 		assert!(koe1 == koe2);
+		assert!(koe1 == koe3);
+		assert!(koe2 == koe3);
+		assert!(a.eq(&koe1.as_ref()));
 	}
 }
